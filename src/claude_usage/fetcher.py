@@ -166,12 +166,13 @@ def store_calibration_point(db: TrackerDB, data: dict) -> None:
         t = db.get_cumulative_tokens(since=start_7d, until=fetched_at)
         tokens_7d = t["total_tokens"]
 
+    plan_tier = db.get_config("plan_tier")
     db.conn.execute(
         """INSERT INTO calibration
            (timestamp, estimated_tokens_5h, estimated_tokens_7d,
-            official_util_5h, official_util_7d)
-           VALUES (?, ?, ?, ?, ?)""",
-        (fetched_at, tokens_5h, tokens_7d, util_5h, util_7d),
+            official_util_5h, official_util_7d, plan_tier)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (fetched_at, tokens_5h, tokens_7d, util_5h, util_7d, plan_tier),
     )
     db.conn.commit()
     log.info(
