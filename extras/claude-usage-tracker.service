@@ -1,0 +1,14 @@
+[Unit]
+Description=Claude Usage Tracker daemon
+After=network.target
+
+[Service]
+Type=simple
+# Adjust WorkingDirectory and ExecStart to match your installation
+WorkingDirectory=%h/claude-usage
+ExecStart=%h/claude-usage/.venv/bin/claude-usage-tracker run
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
