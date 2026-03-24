@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 from typing import Sequence
 
-from claude_usage.models import AgentCompletion, UsageDelta, UsageSnapshot
+from claude_usage.models import AgentCompletion, ConversationBoundary, UsageDelta, UsageSnapshot
 
 DEFAULT_DB_PATH = Path.home() / ".local" / "state" / "claude-usage" / "tracker.db"
 
@@ -90,6 +90,15 @@ CREATE TABLE IF NOT EXISTS session_projects (
     project_name TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_session_projects_name ON session_projects(project_name);
+
+CREATE TABLE IF NOT EXISTS conversation_boundaries (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL,
+    timestamp   TEXT NOT NULL,
+    trigger     TEXT NOT NULL DEFAULT 'unknown',
+    UNIQUE(session_id, timestamp)
+);
+CREATE INDEX IF NOT EXISTS idx_conv_boundaries_session ON conversation_boundaries(session_id);
 """
 
 
@@ -270,6 +279,61 @@ class TrackerDB:
         if auto_commit:
             self.conn.commit()
 
+    # --- Conversation boundaries ---
+
+    def record_conversation_boundary(self, boundary: ConversationBoundary, *, auto_commit: bool = True) -> None:
+        self.conn.execute(
+            """INSERT OR IGNORE INTO conversation_boundaries
+               (session_id, timestamp, trigger)
+               VALUES (?, ?, ?)""",
+            (boundary.session_id, boundary.timestamp, boundary.trigger),
+        )
+        if auto_commit:
+            self.conn.commit()
+
+    def get_conversation_counts(self) -> dict[str, int]:
+        """Return {session_id: conversation_count} for all sessions.
+
+        Conversations = 1 (initial) + number of compact boundaries.
+        """
+        rows = self.conn.execute(
+            """SELECT session_id, COUNT(*) as boundaries
+            FROM conversation_boundaries
+            GROUP BY session_id"""
+        ).fetchall()
+        return {r[0]: r[1] + 1 for r in rows}
+
+    def get_total_conversation_count(self, since: str | None = None) -> int:
+        """Total conversations across all sessions, optionally filtered by time.
+
+        For sessions with no boundaries in the table, each session = 1 conversation.
+        """
+        conditions = []
+        params: list[str] = []
+        if since:
+            conditions.append("s.timestamp >= ?")
+            params.append(since)
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        # Get distinct session count and boundary count in one query
+        row = self.conn.execute(
+            f"""SELECT
+                COUNT(DISTINCT s.session_id) as session_count,
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM conversation_boundaries cb
+                    WHERE cb.session_id IN (
+                        SELECT DISTINCT s2.session_id FROM snapshots s2 {where}
+                    )
+                ), 0) as boundary_count
+            FROM snapshots s
+            {where}""",
+            params + params,
+        ).fetchone()
+
+        return (row[0] or 0) + (row[1] or 0)
+
     # --- Aggregation queries ---
 
     def get_cumulative_tokens(
@@ -431,9 +495,12 @@ class TrackerDB:
             if not m:
                 continue
             project_hash, session_id = m.group(1), m.group(2)
-            # Convert hash to human name: strip common prefixes
+            # Convert hash to human name: strip home dir prefixes
+            # Project hashes look like "-home-user-develop-project-name"
             name = project_hash
-            for prefix in ("-home-flight-develop-", "-home-flight-"):
+            home = Path.home().as_posix().replace("/", "-")  # e.g. "-home-user"
+            for suffix in ("-develop-", "-"):
+                prefix = home + suffix
                 if name.startswith(prefix):
                     name = name[len(prefix):]
                     break
@@ -474,17 +541,40 @@ class TrackerDB:
             params,
         ).fetchall()
 
+        # Get conversation counts per session for enrichment
+        convo_counts = self.get_conversation_counts()
+
         grand_total = sum(r[1] for r in rows) or 1
-        return [
-            {
-                "project_name": r[0],
+
+        # For each project, sum conversations across its sessions
+        # We need session IDs per project for this, so do a secondary lookup
+        project_sessions: dict[str, set[str]] = {}
+        for r in self.conn.execute(
+            f"""SELECT COALESCE(sp.project_name, 'unknown') as project,
+                s.session_id
+            FROM snapshots s
+            LEFT JOIN session_projects sp ON s.session_id = sp.session_id
+            JOIN deltas d ON d.logical_key = s.logical_key
+            WHERE 1=1 {where}
+            GROUP BY project, s.session_id""",
+            params,
+        ).fetchall():
+            project_sessions.setdefault(r[0], set()).add(r[1])
+
+        result = []
+        for r in rows:
+            project_name = r[0]
+            sess_ids = project_sessions.get(project_name, set())
+            convo_count = sum(convo_counts.get(sid, 1) for sid in sess_ids)
+            result.append({
+                "project_name": project_name,
                 "total_tokens": r[1],
                 "output_tokens": r[2],
                 "session_count": r[3],
+                "conversation_count": convo_count,
                 "pct": round(r[1] / grand_total * 100, 1),
-            }
-            for r in rows
-        ]
+            })
+        return result
 
     def get_daily_totals(self, days: int = 30) -> list[dict]:
         """Daily token aggregation for the last N days."""
@@ -533,7 +623,7 @@ class TrackerDB:
         ]
 
     def get_sessions_with_project(self, limit: int = 50) -> list[dict]:
-        """Recent sessions enriched with project name and dominant model."""
+        """Recent sessions enriched with project name, model, and conversation count."""
         rows = self.conn.execute(
             """SELECT s.session_id,
                 COALESCE(sp.project_name, 'unknown') as project,
@@ -541,9 +631,15 @@ class TrackerDB:
                 MAX(s.timestamp) as last_seen,
                 COUNT(DISTINCT s.logical_key) as message_count,
                 COALESCE(SUM(s.total_tokens), 0) as total_tokens,
-                s.model
+                s.model,
+                1 + COALESCE(cb.boundary_count, 0) as conversation_count
             FROM snapshots s
             LEFT JOIN session_projects sp ON s.session_id = sp.session_id
+            LEFT JOIN (
+                SELECT session_id, COUNT(*) as boundary_count
+                FROM conversation_boundaries
+                GROUP BY session_id
+            ) cb ON s.session_id = cb.session_id
             GROUP BY s.session_id
             ORDER BY last_seen DESC
             LIMIT ?""",
@@ -559,6 +655,7 @@ class TrackerDB:
                 "message_count": r[4],
                 "total_tokens": r[5],
                 "model": r[6],
+                "conversation_count": r[7],
             }
             for r in rows
         ]

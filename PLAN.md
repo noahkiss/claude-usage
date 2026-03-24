@@ -239,7 +239,7 @@ The tracker writes to SQLite at `~/.local/state/claude-usage/tracker.db` (co-loc
 
 ### Process model
 
-Systemd user service (like other local apps on stardust). Polling daemon at ~5s interval — simple, no inotify complexity. Service template already exists for other apps.
+Systemd user service. Polling daemon at ~5s interval — simple, no inotify complexity.
 
 ## Remaining Questions
 
