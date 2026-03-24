@@ -56,7 +56,7 @@ c5h=$(countdown "$reset5h")
 c7d=$(countdown "$reset7d")
 
 # Local-time reset timestamps for steering messages (e.g. "at 4:35 PM EDT")
-# Change TZ to your local timezone
+# Customize TZ for your timezone, or remove TZ= to use system default
 local5h=""
 local7d=""
 [[ -n "$reset5h" ]] && local5h=$(date -d "$reset5h" "+%-I:%M %p %Z" 2>/dev/null)
@@ -81,6 +81,8 @@ fi
 # Steering based on utilization level
 # 7d guidance relaxes when reset is <6h away (use it or lose it)
 # Steering messages are explicit about WHY (which limit) and WHEN to resume (reset time).
+# "wrap up" = finish current task, stop sending prompts.
+# "defer new work" = don't start new tasks until the window resets.
 # Helper: float comparison via bc (bash can't compare decimals natively)
 _gte() { (( $(echo "$1 >= $2" | bc -l) )); }
 
@@ -93,9 +95,9 @@ reset7d_at=""
 [[ -n "$local7d" ]] && reset7d_at=" (resets at ${local7d})"
 
 if _gte "$r5h" 95; then
-  msg+=" 5h limit near cap${reset5h_at} — update STATUS.local.md and wrap up. Defer new work until after the 5h window resets. Always mention the reset time when suggesting the user wait or resume later."
+  msg+=" 5h limit near cap${reset5h_at} — wrap up current work. Defer new work until after the 5h window resets. Always mention the reset time when suggesting the user wait or resume later."
 elif _gte "$r5h" 90; then
-  msg+=" 5h usage is critical${reset5h_at}. Avoid large searches, unnecessary agent spawns, and speculative tool calls. Prefer targeted, minimal-context approaches."
+  msg+=" 5h usage is critical${reset5h_at}. Avoid large searches, unnecessary agent spawns, and speculative tool calls. Prefer targeted, minimal-context approaches. Always mention the reset time when suggesting the user wait or come back later."
 elif _gte "$r5h" 75; then
   msg+=" 5h usage is elevated${reset5h_at}. Be mindful of high-token operations — prefer concise tool calls, limit unnecessary file reads, and batch work efficiently."
 fi
@@ -110,4 +112,39 @@ elif _gte "$r7d" 75 && [[ "$r7d_relaxed" == 1 ]]; then
   msg+=" 7d window resets soon${reset7d_at} — no need to conserve, use it up."
 fi
 
-echo "$msg"
+# --- Context window (optional) ---
+# Reads context window usage from Claude Code's statusline data.
+# The statusline writes .context-window.json per-project directory.
+# If unavailable or stale (>120s), this section is silently skipped.
+ctx_used=0
+ctx_msg=""
+DIR_HASH=$(echo "$PWD" | tr '/' '-')
+CTX_FILE="$HOME/.claude/projects/${DIR_HASH}/.context-window.json"
+if [[ -f "$CTX_FILE" ]]; then
+  read -r ctx_remaining ctx_ts < <(jq -r '[.remaining_percentage, .ts] | @tsv' "$CTX_FILE" 2>/dev/null)
+  if [[ -n "$ctx_remaining" ]]; then
+    now_ms=$(($(date +%s) * 1000))
+    age_ms=$(( now_ms - ${ctx_ts:-0} ))
+    if (( age_ms < 120000 )); then
+      # Scale: statusline treats 80% real usage as 100% displayed
+      raw_used=$(printf "%.0f" "$(echo "100 - $ctx_remaining" | bc)")
+      ctx_used=$(( raw_used * 100 / 80 ))
+      (( ctx_used > 100 )) && ctx_used=100
+      ctx_msg="Context window: ${ctx_used}% used."
+      if (( ctx_used >= 90 )); then
+        ctx_msg+=" Context nearly full — consider /compact. This affects THIS session immediately (not a rate limit issue)."
+      elif (( ctx_used >= 75 )); then
+        ctx_msg+=" Context getting full — keep responses concise, consider /compact soon."
+      fi
+    fi
+  fi
+fi
+
+# Lead with whichever concern is more immediate:
+# Context window affects THIS session right now; rate limits affect future sessions.
+if (( ctx_used >= 75 )); then
+  echo "${ctx_msg} ${msg}"
+else
+  [[ -n "$ctx_msg" ]] && msg+=" ${ctx_msg}"
+  echo "$msg"
+fi

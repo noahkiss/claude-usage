@@ -125,12 +125,14 @@ Install it in `~/.claude/settings.json`:
 
 Copy the script to `~/.claude/hooks/` or symlink it from `extras/`.
 
-The hook runs in <100ms, reads a single JSON file, and outputs tiered guidance:
+The hook runs in <100ms and outputs tiered guidance:
 - **75%+** — elevated usage warnings, efficiency reminders
 - **90%+** — critical warnings, minimize tool calls
 - **95%+** — wrap up, defer new work until window resets
 
 It also detects when the 7-day window is about to reset and relaxes conservation guidance ("use it or lose it").
+
+The hook optionally reads context window usage from Claude Code's statusline data (`.context-window.json` per project). When context is high, it prioritizes that warning over rate limits since context exhaustion affects the current session immediately.
 
 ## Calibration
 
