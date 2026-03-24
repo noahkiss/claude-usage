@@ -191,13 +191,14 @@ def ingest_history(
                 t = db.get_cumulative_tokens(since=start_7d, until=fetched_at)
                 tokens_7d = t["total_tokens"]
 
-            # Store calibration point
+            # Store calibration point with current plan tier
+            plan_tier = db.get_config("plan_tier")
             db.conn.execute(
                 """INSERT INTO calibration
                    (timestamp, estimated_tokens_5h, estimated_tokens_7d,
-                    official_util_5h, official_util_7d)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (fetched_at, tokens_5h, tokens_7d, util_5h, util_7d),
+                    official_util_5h, official_util_7d, plan_tier)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (fetched_at, tokens_5h, tokens_7d, util_5h, util_7d, plan_tier),
             )
             count += 1
 
@@ -255,11 +256,17 @@ def compute_ratio(
 
     threshold = min_tokens if min_tokens is not None else default_min
 
+    # Only use calibration data from the current plan tier
+    plan_tier = db.get_config("plan_tier")
+    tier_clause = "AND plan_tier = ?" if plan_tier else "AND plan_tier IS NULL"
+    tier_params: tuple = (plan_tier,) if plan_tier else ()
+
     rows = db.conn.execute(
         f"SELECT timestamp, {col_tokens}, {col_util} FROM calibration "
         f"WHERE {col_tokens} > 0 AND {col_tokens} >= ? AND {col_util} IS NOT NULL AND {col_util} > 0 "
+        f"{tier_clause} "
         "ORDER BY timestamp",
-        (threshold,),
+        (threshold, *tier_params),
     ).fetchall()
 
     if not rows:
@@ -402,12 +409,18 @@ def _compute_marginal_ratio(db: TrackerDB, window: str = "5h") -> float | None:
         col_tokens = "estimated_tokens_7d"
         col_util = "official_util_7d"
 
-    # Get recent calibration data (last 48h)
+    # Get recent calibration data (last 48h), filtered to current plan tier
+    plan_tier = db.get_config("plan_tier")
+    tier_clause = "AND plan_tier = ?" if plan_tier else "AND plan_tier IS NULL"
+    tier_params: tuple = (plan_tier,) if plan_tier else ()
+
     rows = db.conn.execute(
         f"SELECT timestamp, {col_tokens}, {col_util} FROM calibration "
         f"WHERE {col_tokens} > 0 AND {col_util} IS NOT NULL "
         "AND timestamp >= datetime('now', '-2 days') "
+        f"{tier_clause} "
         "ORDER BY timestamp",
+        tier_params,
     ).fetchall()
 
     if len(rows) < 2:

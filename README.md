@@ -13,6 +13,7 @@ The result: always-current usage percentages for both the 5-hour and 7-day rate 
 - **Continuous log scanning** — tails all active session logs (~5s intervals), including subagent files
 - **API reconciliation** — fetches official usage from Anthropic's OAuth endpoint and merges with local estimates
 - **Dynamic calibration** — builds a tokens-to-utilization model from historical data, weighted toward recent observations
+- **Plan-tier-aware calibration** — calibration data is tagged by plan tier (e.g. `max_5x`, `max_20x`), so tier upgrades don't pollute the model
 - **Promotion-aware** — flag time windows with modified rate limits (e.g. 2x off-peak) so calibration stays accurate
 - **Web dashboard** — embedded single-page UI with utilization gauges, session breakdowns, and history charts
 - **Rate limit hook** — bash hook for Claude Code that injects current usage into system context, with tiered steering messages
@@ -80,6 +81,10 @@ claude-usage-tracker fetch --force --json
 # Ingest calibration history and show current ratios
 claude-usage-tracker calibrate
 claude-usage-tracker calibrate --history /path/to/history.jsonl
+
+# Get or set config values
+claude-usage-tracker config plan_tier            # read current tier
+claude-usage-tracker config plan_tier max_20x    # set after plan change
 ```
 
 ### Web dashboard
@@ -133,6 +138,12 @@ The tracker doesn't know the exact conversion between raw tokens and Anthropic's
 
 Each time the API is fetched, the tracker records a calibration point: the official utilization percentage paired with the token count from local logs for the same window. Over time, this builds a weighted regression model (exponential decay, 3-day half-life) that converts tokens to estimated utilization.
 
+Each calibration point is tagged with the active plan tier (e.g. `max_5x`, `max_20x`). When you upgrade or downgrade your plan, set the new tier and calibration rebuilds using only same-tier data — old data is preserved but ignored:
+
+```bash
+claude-usage-tracker config plan_tier max_20x
+```
+
 Calibration points from promotional periods (2x capacity, etc.) are automatically excluded or adjusted so they don't skew the model.
 
 ```bash
@@ -161,7 +172,7 @@ claude-usage-tracker calibrate
 |--------|------|
 | `parser.py` | Extracts token counts, message IDs, and session metadata from JSONL lines |
 | `scanner.py` | Discovers session files, tracks read offsets, feeds new lines to the parser |
-| `db.py` | SQLite schema and queries — events, calibration points, promotions, file tracking |
+| `db.py` | SQLite schema and queries — events, calibration points, promotions, config, file tracking |
 | `fetcher.py` | OAuth-authenticated API calls to Anthropic's usage endpoint with backoff |
 | `calibrator.py` | Builds weighted token-to-utilization ratios from paired local/API observations |
 | `aggregator.py` | Combines API snapshots with calibrated local estimates into a unified report |

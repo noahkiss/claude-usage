@@ -169,6 +169,21 @@ def cmd_serve(args: argparse.Namespace) -> None:
     db.close()
 
 
+def cmd_config(args: argparse.Namespace) -> None:
+    """Get or set config values."""
+    db = TrackerDB(args.db)
+    if args.value is not None:
+        db.set_config(args.key, args.value)
+        print(f"{args.key} = {args.value}")
+    else:
+        val = db.get_config(args.key)
+        if val is None:
+            print(f"{args.key}: (not set)")
+        else:
+            print(f"{args.key} = {val}")
+    db.close()
+
+
 def cmd_calibrate(args: argparse.Namespace) -> None:
     """Ingest history.jsonl and show calibration ratios."""
     from claude_usage.calibrator import HISTORY_FILE
@@ -255,6 +270,11 @@ def main(argv: list[str] | None = None) -> None:
     p_serve.add_argument("--port", type=int, default=2725, help="Listen port (default: 2725)")
     p_serve.add_argument("--host", type=str, default="0.0.0.0", help="Listen host (default: 0.0.0.0)")
 
+    # config
+    p_config = sub.add_parser("config", help="Get or set config values (e.g. plan_tier)")
+    p_config.add_argument("key", help="Config key (e.g. plan_tier)")
+    p_config.add_argument("value", nargs="?", help="Value to set (omit to read)")
+
     # calibrate
     p_cal = sub.add_parser("calibrate", help="Ingest history and show calibration ratios")
     p_cal.add_argument("--history", type=str, help="Path to history.jsonl")
@@ -279,6 +299,8 @@ def main(argv: list[str] | None = None) -> None:
         cmd_fetch(args)
     elif args.command == "serve":
         cmd_serve(args)
+    elif args.command == "config":
+        cmd_config(args)
     elif args.command == "calibrate":
         cmd_calibrate(args)
     else:

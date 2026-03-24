@@ -73,7 +73,13 @@ CREATE TABLE IF NOT EXISTS calibration (
     estimated_tokens_5h  INTEGER,
     estimated_tokens_7d  INTEGER,
     official_util_5h     REAL,
-    official_util_7d     REAL
+    official_util_7d     REAL,
+    plan_tier   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS config (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS promotions (
@@ -115,9 +121,34 @@ class TrackerDB:
 
     def _init_schema(self) -> None:
         self.conn.executescript(SCHEMA_SQL)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Run lightweight migrations for schema additions."""
+        # Add plan_tier column to calibration if missing
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(calibration)")}
+        if "plan_tier" not in cols:
+            self.conn.execute("ALTER TABLE calibration ADD COLUMN plan_tier TEXT")
+            self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
+
+    # --- Config ---
+
+    def get_config(self, key: str, default: str | None = None) -> str | None:
+        row = self.conn.execute(
+            "SELECT value FROM config WHERE key = ?", (key,)
+        ).fetchone()
+        return row[0] if row else default
+
+    def set_config(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO config (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        self.conn.commit()
 
     # --- File offset tracking ---
 
