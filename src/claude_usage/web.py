@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 from claude_usage.aggregator import aggregate_usage, get_last_api_snapshot
 from claude_usage.calibrator import compute_ratio
 from claude_usage.db import TrackerDB
+from claude_usage.scanner import backfill_conversation_boundaries
 from claude_usage.history import (
     get_extra_usage_periods,
     get_plan_transitions,
@@ -262,6 +263,7 @@ def run_server(
     """Start the web dashboard server."""
     # Initial refresh
     db.refresh_session_projects()
+    backfill_conversation_boundaries(db)
 
     # Background refresh
     stop_event = start_background_refresh(db)
@@ -549,7 +551,7 @@ tr:last-child td { border-bottom: none; }
     <div class="stat-value" id="stat-tokens">—</div>
   </div>
   <div class="stat">
-    <div class="stat-label">Sessions Today</div>
+    <div class="stat-label">Activity Today</div>
     <div class="stat-value" id="stat-sessions">—</div>
   </div>
   <div class="stat">
@@ -595,6 +597,7 @@ tr:last-child td { border-bottom: none; }
         <th>Project</th>
         <th>Session</th>
         <th>Model</th>
+        <th class="right">Convos</th>
         <th class="right">Messages</th>
         <th class="right">Tokens</th>
         <th>Last Active</th>
@@ -654,6 +657,7 @@ const countdown = s => {
   if (sec <= 0) return 'resetting...';
   const h = Math.floor(sec/3600);
   const m = Math.floor((sec%3600)/60);
+  if (h > 30) { const d = Math.floor(h/24); return d + 'd ' + (h%24) + 'h'; }
   return h > 0 ? h + 'h ' + m + 'm' : m + 'm';
 };
 
@@ -768,10 +772,15 @@ async function refreshStats() {
   ]);
   const today = daily[daily.length - 1];
   document.getElementById('stat-tokens').textContent = today ? fmt(today.total_tokens) : '0';
-  // Count sessions active today
+  // Count sessions and conversations active today
   const todayStr = new Date().toISOString().slice(0, 10);
   const todaySessions = sessions.filter(s => s.last_seen && s.last_seen.startsWith(todayStr));
-  document.getElementById('stat-sessions').textContent = String(todaySessions.length);
+  const todayConvos = todaySessions.reduce((sum, s) => sum + (s.conversation_count || 1), 0);
+  const sessionCount = todaySessions.length;
+  const activityText = todayConvos > sessionCount
+    ? `${todayConvos} convos / ${sessionCount} sess`
+    : `${sessionCount} sess`;
+  document.getElementById('stat-sessions').textContent = activityText;
   document.getElementById('stat-project').textContent = projects[0]?.project_name || '—';
   document.getElementById('stat-model').textContent = models[0]?.model?.split('/').pop()?.replace('claude-','') || '—';
 }
@@ -848,7 +857,7 @@ async function refreshProjects() {
   // Table
   const tbody = document.querySelector('#project-table tbody');
   tbody.innerHTML = top.map(d =>
-    `<tr><td>${d.project_name}</td><td class="right mono">${fmt(d.total_tokens)}</td><td class="right">${d.pct}%</td><td><div class="bar-bg"><div class="bar-fill" style="width:${d.pct}%"></div></div></td><td class="right muted">${d.session_count} sess</td></tr>`
+    `<tr><td>${d.project_name}</td><td class="right mono">${fmt(d.total_tokens)}</td><td class="right">${d.pct}%</td><td><div class="bar-bg"><div class="bar-fill" style="width:${d.pct}%"></div></div></td><td class="right muted">${(d.conversation_count || d.session_count) > d.session_count ? d.conversation_count + ' convos / ' + d.session_count + ' sess' : d.session_count + ' sess'}</td></tr>`
   ).join('');
 }
 
@@ -889,10 +898,12 @@ async function refreshSessions() {
   const tbody = document.querySelector('#session-table tbody');
   tbody.innerHTML = data.map(d => {
     const model = (d.model || '').split('/').pop().replace('claude-','');
+    const convos = d.conversation_count || 1;
     return `<tr>
       <td>${d.project_name}</td>
       <td class="mono muted">${d.session_id.slice(0,12)}...</td>
       <td class="muted">${model}</td>
+      <td class="right">${convos > 1 ? convos : ''}</td>
       <td class="right">${d.message_count}</td>
       <td class="right mono">${fmt(d.total_tokens)}</td>
       <td class="muted">${shortTime(d.last_seen)}</td>
