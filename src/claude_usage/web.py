@@ -701,8 +701,8 @@ async function refreshStats() {
   const todayConvos = todaySessions.reduce((sum, s) => sum + (s.conversation_count || 1), 0);
   const sessionCount = todaySessions.length;
   const activityText = todayConvos > sessionCount
-    ? `${todayConvos} convos / ${sessionCount} sess`
-    : `${sessionCount} sess`;
+    ? `${todayConvos} convos / ${sessionCount} sessions`
+    : `${sessionCount} sessions`;
   document.getElementById('stat-sessions').textContent = activityText;
   document.getElementById('stat-project').textContent = projects[0]?.project_name || '—';
   document.getElementById('stat-model').textContent = models[0]?.model?.split('/').pop()?.replace('claude-','') || '—';
@@ -780,7 +780,7 @@ async function refreshProjects() {
   // Table
   const tbody = document.querySelector('#project-table tbody');
   tbody.innerHTML = top.map(d =>
-    `<tr><td>${d.project_name}</td><td class="right mono">${fmt(d.total_tokens)}</td><td class="right">${d.pct}%</td><td><div class="bar-bg"><div class="bar-fill" style="width:${d.pct}%"></div></div></td><td class="right muted">${(d.conversation_count || d.session_count) > d.session_count ? d.conversation_count + ' convos / ' + d.session_count + ' sess' : d.session_count + ' sess'}</td></tr>`
+    `<tr><td>${d.project_name}</td><td class="right mono">${fmt(d.total_tokens)}</td><td class="right">${d.pct}%</td><td><div class="bar-bg"><div class="bar-fill" style="width:${d.pct}%"></div></div></td><td class="right muted">${(d.conversation_count || d.session_count) > d.session_count ? d.conversation_count + ' convos / ' + d.session_count + ' sessions' : d.session_count + ' sessions'}</td></tr>`
   ).join('');
 }
 
