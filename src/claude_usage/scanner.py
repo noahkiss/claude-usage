@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 from claude_usage.db import TrackerDB
-from claude_usage.models import AgentCompletion, UsageSnapshot
+from claude_usage.models import AgentCompletion, ConversationBoundary, UsageSnapshot
 from claude_usage.parser import parse_line
 
 log = logging.getLogger(__name__)
@@ -85,12 +85,58 @@ def read_new_lines(file_path: Path, offset: int) -> tuple[list[str], int]:
 # Lines without these substrings can't produce UsageSnapshot or AgentCompletion.
 _INTERESTING_MARKERS = ('"type":"assistant"', '"type": "assistant"',
                         '"agent_progress"',
-                        '"totalTokens"')
+                        '"totalTokens"',
+                        '"compact_boundary"')
 
 
 def _line_might_be_interesting(line: str) -> bool:
     """Fast pre-filter: skip lines that can't contain usage data."""
     return any(m in line for m in _INTERESTING_MARKERS)
+
+
+def backfill_conversation_boundaries(db: TrackerDB, projects_dir: Path = CLAUDE_PROJECTS_DIR) -> int:
+    """One-time scan of all JSONL files to extract compact_boundary records.
+
+    This is needed because existing ingested files won't be re-read by
+    scan_and_ingest (byte offsets already past these records).
+    Lightweight: only JSON-parses lines containing 'compact_boundary'.
+    """
+    import json
+
+    files = discover_jsonl_files(projects_dir)
+    count = 0
+
+    for file_path in files:
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if '"compact_boundary"' not in line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if rec.get("type") != "system" or rec.get("subtype") != "compact_boundary":
+                        continue
+                    session_id = rec.get("sessionId", "")
+                    if not session_id:
+                        continue
+                    metadata = rec.get("compactMetadata", {}) or {}
+                    trigger = metadata.get("trigger", "unknown")
+                    boundary = ConversationBoundary(
+                        session_id=session_id,
+                        timestamp=rec.get("timestamp", ""),
+                        trigger=trigger,
+                    )
+                    db.record_conversation_boundary(boundary)
+                    count += 1
+        except OSError as e:
+            log.warning("Error reading %s for backfill: %s", file_path, e)
+            continue
+
+    if count:
+        log.info("Backfilled %d conversation boundaries", count)
+    return count
 
 
 def scan_and_ingest(db: TrackerDB, projects_dir: Path = CLAUDE_PROJECTS_DIR) -> int:
@@ -125,6 +171,9 @@ def scan_and_ingest(db: TrackerDB, projects_dir: Path = CLAUDE_PROJECTS_DIR) -> 
                     events += 1
                 elif isinstance(parsed, AgentCompletion):
                     db.record_agent_completion(parsed, auto_commit=False)
+                    events += 1
+                elif isinstance(parsed, ConversationBoundary):
+                    db.record_conversation_boundary(parsed, auto_commit=False)
                     events += 1
 
             db.set_file_offset(fp_str, new_offset, file_path.stat().st_mtime)

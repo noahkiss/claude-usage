@@ -18,7 +18,7 @@ from claude_usage.aggregator import (
 from claude_usage.calibrator import compute_ratio, ingest_history
 from claude_usage.db import DEFAULT_DB_PATH, TrackerDB
 from claude_usage.fetcher import FETCH_INTERVAL, fetch_and_store
-from claude_usage.scanner import scan_and_ingest
+from claude_usage.scanner import backfill_conversation_boundaries, scan_and_ingest
 
 log = logging.getLogger("claude_usage")
 
@@ -47,6 +47,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     count = scan_and_ingest(db)
     if count:
         log.info("Initial scan: ingested %d events", count)
+    backfill_conversation_boundaries(db)
 
     # Initial API fetch
     if not args.no_fetch:

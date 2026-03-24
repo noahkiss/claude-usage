@@ -82,6 +82,15 @@ class AgentCompletion:
 
 
 @dataclass(frozen=True, slots=True)
+class ConversationBoundary:
+    """Marks a conversation boundary within a session (compact/clear)."""
+
+    session_id: str
+    timestamp: str
+    trigger: str  # e.g. "auto", "manual"
+
+
+@dataclass(frozen=True, slots=True)
 class CalibrationPoint:
     """A pair of (our token estimate, official API utilization) at a point in time."""
 

@@ -8,11 +8,12 @@ from typing import Union
 from claude_usage.models import (
     ActorType,
     AgentCompletion,
+    ConversationBoundary,
     SourceType,
     UsageSnapshot,
 )
 
-ParsedEvent = Union[UsageSnapshot, AgentCompletion, None]
+ParsedEvent = Union[UsageSnapshot, AgentCompletion, ConversationBoundary, None]
 
 
 def parse_line(line: str) -> ParsedEvent:
@@ -36,6 +37,8 @@ def parse_line(line: str) -> ParsedEvent:
         return _parse_progress(rec)
     elif rec_type == "user":
         return _parse_tool_use_result(rec)
+    elif rec_type == "system":
+        return _parse_system(rec)
     return None
 
 
@@ -172,4 +175,23 @@ def _parse_tool_use_result(rec: dict) -> AgentCompletion | None:
         output_tokens=usage.get("output_tokens", 0) or 0,
         cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0) or 0,
         cache_read_input_tokens=usage.get("cache_read_input_tokens", 0) or 0,
+    )
+
+
+def _parse_system(rec: dict) -> ConversationBoundary | None:
+    """Parse a system record for conversation boundaries (compact/clear)."""
+    if rec.get("subtype") != "compact_boundary":
+        return None
+
+    session_id = rec.get("sessionId", "")
+    if not session_id:
+        return None
+
+    metadata = rec.get("compactMetadata", {}) or {}
+    trigger = metadata.get("trigger", "unknown")
+
+    return ConversationBoundary(
+        session_id=session_id,
+        timestamp=rec.get("timestamp", ""),
+        trigger=trigger,
     )
