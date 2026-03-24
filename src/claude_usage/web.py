@@ -12,7 +12,6 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from claude_usage.aggregator import aggregate_usage, get_last_api_snapshot
-from claude_usage.calibrator import compute_ratio
 from claude_usage.db import TrackerDB
 from claude_usage.scanner import backfill_conversation_boundaries
 from claude_usage.history import (
@@ -104,7 +103,7 @@ def _make_handler(db: TrackerDB):
             report = aggregate_usage(db, api_snapshot)
 
             # Pacing calculation
-            pacing = _compute_pacing(db, report)
+            pacing = {}
 
             # Sub-windows and extra usage from API snapshot
             sub_windows = {}
@@ -201,41 +200,6 @@ def _make_handler(db: TrackerDB):
     return Handler
 
 
-def _compute_pacing(db: TrackerDB, report: dict) -> dict:
-    """Compute projected utilization at window reset."""
-    pacing = {}
-    for window_key, cal_window in [("five_hour", "5h"), ("seven_day", "7d")]:
-        bucket = report[window_key]
-        est = bucket.get("estimated_utilization") or bucket.get("api_utilization")
-        resets_at = bucket.get("api_resets_at")
-        if est is None or resets_at is None:
-            continue
-
-        try:
-            reset_dt = datetime.fromisoformat(resets_at)
-            now = _now_utc()
-            hours_remaining = max(0, (reset_dt - now).total_seconds() / 3600)
-        except (ValueError, TypeError):
-            continue
-
-        # Get tokens from last hour for rate
-        one_hour_ago = _iso(now - timedelta(hours=1))
-        hourly = db.get_hourly_totals(one_hour_ago)
-        tokens_last_hour = sum(h["total_tokens"] for h in hourly)
-
-        # Get calibration ratio
-        cal = compute_ratio(db, cal_window)
-        if cal and tokens_last_hour > 0:
-            rate_per_hour = tokens_last_hour * cal.ratio
-            projected = est + (rate_per_hour * hours_remaining)
-            pacing[cal_window] = {
-                "current": round(est, 1),
-                "projected": round(min(100.0, projected), 1),
-                "hours_remaining": round(hours_remaining, 1),
-                "tokens_per_hour": tokens_last_hour,
-            }
-
-    return pacing
 
 
 def start_background_refresh(db: TrackerDB, interval: int = 60) -> threading.Event:
@@ -394,20 +358,6 @@ a { color: var(--blue); text-decoration: none; }
 .card-value.yellow { color: var(--yellow); }
 .card-value.red { color: var(--red); }
 
-/* Pacing strip */
-.pacing {
-  background: var(--mantle);
-  border: 1px solid var(--surface0);
-  border-radius: 8px;
-  padding: 0.75rem 1.25rem;
-  margin-bottom: 1.5rem;
-  font-size: 0.85rem;
-  color: var(--subtext0);
-  display: flex;
-  gap: 2rem;
-}
-.pacing span { color: var(--text); font-weight: 600; }
-
 /* Stat row */
 .stats {
   display: grid;
@@ -532,18 +482,6 @@ tr:last-child td { border-bottom: none; }
   </div>
 </div>
 
-<div class="cards">
-  <div class="card">
-    <div class="card-label">5h Pacing</div>
-    <div class="card-value" id="pace-5h">—</div>
-    <div class="card-sub" id="pace-5h-sub"></div>
-  </div>
-  <div class="card">
-    <div class="card-label">7d Pacing</div>
-    <div class="card-value" id="pace-7d">—</div>
-    <div class="card-sub" id="pace-7d-sub"></div>
-  </div>
-</div>
 
 <div class="stats">
   <div class="stat">
@@ -721,21 +659,6 @@ async function refreshStatus() {
   // Meta
   document.getElementById('api-time').textContent = timeAgo(d.api_fetched_at);
   document.getElementById('update-time').textContent = shortTime(d.generated_at);
-  // Pacing cards
-  for (const [w, elId] of [['5h','5h'],['7d','7d']]) {
-    const p = d.pacing?.[w];
-    const el = document.getElementById('pace-' + elId);
-    const sub = document.getElementById('pace-' + elId + '-sub');
-    if (p) {
-      el.textContent = p.projected + '%';
-      el.className = 'card-value ' + utilColor(p.projected);
-      sub.textContent = p.hours_remaining + 'h left · ' + fmt(p.tokens_per_hour) + ' tok/hr';
-    } else {
-      el.textContent = '—';
-      el.className = 'card-value';
-      sub.textContent = 'Insufficient data';
-    }
-  }
 
   // Sub-limits table (Sonnet, Opus, Extra Usage) — bottom section
   const limitsSection = document.getElementById('sub-limits-section');
