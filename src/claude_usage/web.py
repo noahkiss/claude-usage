@@ -95,6 +95,29 @@ def _make_handler(db: TrackerDB):
             else:
                 self._json_response({"error": "not found"}, 404)
 
+        def do_POST(self) -> None:  # noqa: N802
+            parsed = urlparse(self.path)
+            path = parsed.path.rstrip("/") or "/"
+
+            post_routes = {
+                "/api/plan": self._route_plan_post,
+            }
+
+            handler = post_routes.get(path)
+            if not handler:
+                self._json_response({"error": "not found"}, 404)
+                return
+
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length)) if length else {}
+                handler(body)
+            except (json.JSONDecodeError, ValueError):
+                self._json_response({"error": "invalid JSON"}, 400)
+            except Exception:
+                log.exception("Error handling POST %s", path)
+                self._json_response({"error": "internal server error"}, 500)
+
         def _route_index(self, qs: dict) -> None:
             self._html_response(DASHBOARD_HTML)
 
@@ -194,7 +217,33 @@ def _make_handler(db: TrackerDB):
                 current_tier = "max" if (has_opus or has_extra) else "pro"
             self._json_response({
                 "current_tier": current_tier,
+                "plan_tier": db.get_config("plan_tier"),
                 "transitions": transitions,
+            })
+
+        def _route_plan_post(self, body: dict) -> None:
+            plan_tier = body.get("plan_tier", "").strip()
+            if not plan_tier:
+                self._json_response({"error": "plan_tier required"}, 400)
+                return
+
+            changed_at = body.get("changed_at", "").strip()
+            db.set_config("plan_tier", plan_tier)
+
+            # Re-tag calibration points after the transition timestamp
+            retagged = 0
+            if changed_at:
+                cur = db.conn.execute(
+                    "UPDATE calibration SET plan_tier = ? WHERE timestamp >= ?",
+                    (plan_tier, changed_at),
+                )
+                retagged = cur.rowcount
+                db.conn.commit()
+
+            self._json_response({
+                "plan_tier": plan_tier,
+                "changed_at": changed_at or None,
+                "retagged": retagged,
             })
 
     return Handler
@@ -451,10 +500,84 @@ tr:last-child td { border-bottom: none; }
 .row { display: flex; gap: 1rem; margin-bottom: 1.5rem; }
 .row > * { flex: 1; }
 
+/* Plan tier popover */
+.badge { cursor: pointer; position: relative; }
+.plan-popover {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 0.5rem;
+  background: var(--mantle);
+  border: 1px solid var(--surface1);
+  border-radius: 8px;
+  padding: 1rem;
+  min-width: 260px;
+  z-index: 100;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+.plan-popover.open { display: block; }
+.plan-popover label {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--overlay1);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.25rem;
+  margin-top: 0.5rem;
+}
+.plan-popover label:first-child { margin-top: 0; }
+.plan-popover select, .plan-popover input[type="datetime-local"] {
+  width: 100%;
+  background: var(--surface0);
+  color: var(--text);
+  border: 1px solid var(--surface1);
+  border-radius: 4px;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.8rem;
+  font-family: inherit;
+}
+.plan-popover .hint {
+  font-size: 0.7rem;
+  color: var(--overlay0);
+  margin-top: 0.15rem;
+}
+.plan-popover .actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+.plan-popover button {
+  flex: 1;
+  padding: 0.35rem 0.75rem;
+  border-radius: 4px;
+  border: 1px solid var(--surface1);
+  font-size: 0.75rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+.plan-popover .btn-save {
+  background: var(--blue);
+  color: var(--crust);
+  border-color: var(--blue);
+  font-weight: 600;
+}
+.plan-popover .btn-cancel {
+  background: var(--surface0);
+  color: var(--subtext0);
+}
+.plan-popover .status-msg {
+  font-size: 0.7rem;
+  color: var(--green);
+  margin-top: 0.5rem;
+  min-height: 1em;
+}
+
 @media (max-width: 768px) {
   .cards { grid-template-columns: 1fr; }
   .stats { grid-template-columns: repeat(2, 1fr); }
   .row { flex-direction: column; }
+  .plan-popover { left: auto; right: 0; }
 }
 </style>
 </head>
@@ -462,7 +585,24 @@ tr:last-child td { border-bottom: none; }
 
 <div class="header">
   <h1>Claude Usage</h1>
-  <span class="badge" id="plan-badge">—</span>
+  <span class="badge" id="plan-badge" onclick="togglePlanPopover(event)">—
+    <div class="plan-popover" id="plan-popover">
+      <label for="plan-tier-select">Calibration Tier</label>
+      <select id="plan-tier-select">
+        <option value="pro">Pro</option>
+        <option value="max_5x">Max 5x</option>
+        <option value="max_20x">Max 20x</option>
+      </select>
+      <label for="plan-changed-at">Changed At (optional)</label>
+      <input type="datetime-local" id="plan-changed-at" step="60">
+      <div class="hint">Re-tags calibration data after this time</div>
+      <div class="actions">
+        <button class="btn-cancel" onclick="closePlanPopover(event)">Cancel</button>
+        <button class="btn-save" onclick="savePlanTier(event)">Save</button>
+      </div>
+      <div class="status-msg" id="plan-status"></div>
+    </div>
+  </span>
   <div class="meta">
     <div>API: <span id="api-time">—</span></div>
     <div>Updated: <span id="update-time">—</span></div>
@@ -883,13 +1023,58 @@ async function refreshExtraUsage() {
   ).join('');
 }
 
-// --- Plan badge (300s) ---
+// --- Plan badge + popover (300s) ---
 async function refreshPlan() {
   const data = await fetchJSON('/api/plan');
   const badge = document.getElementById('plan-badge');
-  badge.textContent = data.current_tier?.toUpperCase() || '—';
-  badge.style.color = data.current_tier === 'max' ? C.mauve : C.blue;
+  const tierLabel = data.plan_tier || data.current_tier || '—';
+  badge.childNodes[0].textContent = tierLabel.toUpperCase().replace('_', ' ') + ' ';
+  badge.style.color = tierLabel.includes('max') ? C.mauve : C.blue;
+  // Sync select
+  const sel = document.getElementById('plan-tier-select');
+  if (data.plan_tier && sel) sel.value = data.plan_tier;
 }
+function togglePlanPopover(e) {
+  e.stopPropagation();
+  const pop = document.getElementById('plan-popover');
+  pop.classList.toggle('open');
+  document.getElementById('plan-status').textContent = '';
+}
+function closePlanPopover(e) {
+  e.stopPropagation();
+  document.getElementById('plan-popover').classList.remove('open');
+}
+async function savePlanTier(e) {
+  e.stopPropagation();
+  const tier = document.getElementById('plan-tier-select').value;
+  const changedAt = document.getElementById('plan-changed-at').value;
+  const body = { plan_tier: tier };
+  if (changedAt) body.changed_at = new Date(changedAt).toISOString();
+  const r = await fetch('/api/plan', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json();
+  const status = document.getElementById('plan-status');
+  if (r.ok) {
+    const msg = data.retagged > 0 ? `Saved. Re-tagged ${data.retagged} calibration points.` : 'Saved.';
+    status.style.color = C.green;
+    status.textContent = msg;
+    refreshPlan();
+    setTimeout(() => closePlanPopover(e), 1500);
+  } else {
+    status.style.color = C.red;
+    status.textContent = data.error || 'Failed';
+  }
+}
+// Close popover on outside click
+document.addEventListener('click', e => {
+  const pop = document.getElementById('plan-popover');
+  if (pop.classList.contains('open') && !pop.contains(e.target)) {
+    pop.classList.remove('open');
+  }
+});
 
 // --- Toggle wiring ---
 function wireToggle(id, getter, setter, refresh) {
